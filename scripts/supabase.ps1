@@ -9,7 +9,8 @@ $secure = Get-Content $file | ConvertTo-SecureString
 $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
 try {
   $env:SUPABASE_ACCESS_TOKEN = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
-  npx supabase @args
+  # npx.ps1 経由だと引数が渡らないことがあるため npx.cmd を直接呼ぶ
+  & npx.cmd --yes supabase @args
 } finally {
   [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
   Remove-Item Env:SUPABASE_ACCESS_TOKEN -ErrorAction SilentlyContinue

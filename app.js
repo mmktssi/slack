@@ -1,10 +1,9 @@
 'use strict';
 /* =========================================================
    Slack風 研修用チャットUI
-   データはブラウザの localStorage に保存されます
+   データは Supabase（user_states テーブル）に利用者ごとに保存されます
    ========================================================= */
 
-const STORE_KEY = 'slack-kensyu-v2';
 const DAY = 86400000;
 const WEEK = ['日', '月', '火', '水', '木', '金', '土'];
 
@@ -184,80 +183,77 @@ function autoLink(html) {
   return tpl.innerHTML;
 }
 
-/* ---------- 初期データ ---------- */
-function seed() {
+/* ---------- 初期データ（本番：架空メンバー・研修用メッセージなし） ---------- */
+function seed(profile = {}) {
   const now = Date.now();
-  const t = (daysAgo, h, m) => { const d = new Date(now - daysAgo * DAY); d.setHours(h, m, 0, 0); return d.getTime(); };
-  const msg = (user, ts, html, extra = {}) => ({ id: uid(), user, ts, html, reactions: {}, replies: [], files: [], ...extra });
   const users = {
-    me: { id: 'me', name: '自分', color: '#e01e5a', title: '会計事業部 メンバー', status: '' },
-    u1: { id: 'u1', name: 'テスト1', color: '#1264a3', title: '経理担当', status: '🏢 出社中' },
-    u2: { id: 'u2', name: 'テスト2', color: '#2eb67d', title: '事務局', status: '' },
-    u3: { id: 'u3', name: 'テスト3', color: '#e8912d', title: '営業', status: '🚃 移動中' },
-    u4: { id: 'u4', name: 'テスト4', color: '#9b59b6', title: '社長室', status: '' },
+    me: { id: 'me', name: profile.name || '自分', email: profile.email || '', color: '#e01e5a', title: '', status: '' },
     bot: { id: 'bot', name: 'Slackbot', color: '#4a154b', title: 'ボット', bot: true, status: '' },
   };
-  const all = ['me', 'u1', 'u2', 'u3', 'u4'];
+  const ch = (id, name, topic) => ({ id, type: 'channel', name, members: ['me'], topic, starred: false, muted: false, private: false, canvas: { title: '', body: '' } });
   const channels = [
-    { id: 'c1', type: 'channel', name: 'テストチャンネル1', members: all, topic: '全体連絡用チャンネルです', starred: false, muted: false, private: false, canvas: { title: '', body: '' } },
-    { id: 'c2', type: 'channel', name: 'テストチャンネル2', members: all, topic: '毎月の引き落とし予定額の確認資料を共有します', starred: false, muted: false, private: false, canvas: { title: '', body: '' } },
-    { id: 'c3', type: 'channel', name: 'テストチャンネル3', members: all, topic: '未納状況の報告', starred: false, muted: false, private: false, canvas: { title: '', body: '' } },
+    ch('c1', '全体', '全体へのお知らせ用チャンネルです'),
+    ch('c2', '雑談', ''),
     { id: 'd_bot', type: 'dm', name: '', members: ['me', 'bot'], starred: false, muted: false, canvas: { title: '', body: '' } },
-    { id: 'd_u1', type: 'dm', name: '', members: ['me', 'u1'], starred: false, muted: false, canvas: { title: '', body: '' } },
-    { id: 'd_u2', type: 'dm', name: '', members: ['me', 'u2'], starred: false, muted: false, canvas: { title: '', body: '' } },
     { id: 'd_me', type: 'dm', name: '', members: ['me'], starred: false, muted: false, canvas: { title: '', body: '' } },
-  ];
-  const xlsx = { id: uid(), name: 'R.8　引き落とし予定額 確認資料 (2).xlsx', size: 48213, mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', sample: 'sheet' };
-  const general = [
-    msg('u2', t(9, 9, 12), '皆さんおはようございます！今月もよろしくお願いします🙇‍♀️', { reactions: { '👍': ['u1', 'u3'], '🙇': ['u4'] } }),
-    msg('u1', t(9, 9, 30), '今月の締め日は<b>25日</b>です。請求書の提出をお忘れなく。'),
-    msg('u4', t(5, 14, 2), '来週の定例会議は水曜 15:00 からに変更になりました。', {
-      replies: [
-        msg('u3', t(5, 14, 20), '承知しました！'),
-        msg('u2', t(5, 14, 41), '会議室を予約しておきます📌'),
-      ],
-    }),
-    msg('u1', t(2, 20, 57), '', { sub: 'Excel スプレッドシート', files: [xlsx] }),
-  ];
-  const c2 = [
-    msg('u2', t(4, 10, 5), '確認資料をアップロードしました。各担当の欄を確認して<span class="mention" data-uid="me">@自分</span> さん、チェックをお願いします。'),
-    msg('u3', t(4, 11, 40), '<ul><li>テスト5さん分 → 確認済み</li><li>テスト6さん分 → 確認中</li></ul>'),
-  ];
-  const c3 = [
-    msg('u4', t(3, 16, 0), '<b>【全体連絡】</b>未納が発生している件について、各担当者は今週中に状況を報告してください。', { reactions: { '✅': ['u1', 'u2', 'u3'] } }),
-  ];
-  const botDm = [
-    msg('bot', t(10, 9, 0), 'ようこそ！ここは研修用のSlack風ワークスペースです 🎉<br>メッセージ送信、スレッド返信、リアクション、ファイル添付、検索などを自由に試してみてください。<br>わからないことがあれば、ここに「ヘルプ」と送ってみてください。'),
-  ];
-  const dmU1 = [
-    msg('u1', t(1, 18, 22), 'お疲れさまです。明日の資料、確認できたら教えてください！'),
-  ];
-  const meDm = [
-    msg('me', t(6, 8, 0), 'ここは自分用のメモスペースです。<br>To-Doや下書きを残しておくのに便利です。'),
   ];
   return {
     v: 1, me: 'me', workspace: '会計事業部', theme: 'light', users, channels,
-    messages: { c1: general, c2, c3, d_bot: botDm, d_u1: dmU1, d_u2: [], d_me: meDm },
-    lastRead: { c1: t(3, 0, 0), c2: now, c3: t(4, 0, 0), d_bot: now, d_u1: t(2, 0, 0), d_u2: now, d_me: now },
-    current: 'c1', drafts: {}, todos: [
-      { id: uid(), text: '引き落とし予定額の確認資料をチェック', done: false },
-      { id: uid(), text: '未納報告を社長室へ提出', done: false },
-    ],
+    messages: { c1: [], c2: [], d_bot: [], d_me: [] },
+    lastRead: { c1: now, c2: now, d_bot: now, d_me: now },
+    current: 'c1', drafts: {}, todos: [],
     activity: [], bannerClosed: {}, collapsed: {}, away: false,
+    trash: [], starredFiles: [],
   };
 }
 
-let S;
-function load() {
-  try { S = JSON.parse(localStorage.getItem(STORE_KEY)); } catch { S = null; }
-  if (!S || S.v !== 1) S = seed();
+/* ---------- Supabase（本番データの保存先・認証） ---------- */
+const SB = window.supabase && window.SUPABASE_CONFIG
+  ? window.supabase.createClient(window.SUPABASE_CONFIG.url, window.SUPABASE_CONFIG.key, { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false } })
+  : null;
+let authUser = null;      // サインイン中のユーザー（Supabase）
+let S = seed();           // サインインするまでは空のワークスペース
+let saveTimer = 0, saveDirty = false, saving = null;
+
+function normalizeState() {
   S.trash = S.trash || [];               // 削除済みファイル
   S.starredFiles = S.starredFiles || []; // スター付きファイル（キー）
+  S.prefs = S.prefs || {};
+  delete S.auth; delete S.signedOut;     // 旧ローカル認証の名残
+  if (authUser) { const u = S.users[S.me]; if (u && !u.email) u.email = authUser.email; }
 }
+// サインインしたユーザーのデータを読み込む（初回は新しいワークスペースを作成）
+async function loadRemote(user) {
+  const { data, error } = await SB.from('user_states').select('data').eq('user_id', user.id).maybeSingle();
+  if (error) throw error;
+  if (data?.data?.v === 1) S = data.data;
+  else {
+    S = seed({ name: user.email.split('@')[0], email: user.email });
+    const { error: e2 } = await SB.from('user_states').insert({ user_id: user.id, data: S });
+    if (e2) throw e2;
+  }
+  normalizeState();
+}
+// 変更はまとめて少し後に保存（連続した操作で何度も送らないように）
 function save() {
-  try { localStorage.setItem(STORE_KEY, JSON.stringify(S)); }
-  catch (e) { toast('保存容量を超えました。大きなファイルを削除してください'); }
+  if (!authUser) return;
+  saveDirty = true;
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(flushSave, 700);
 }
+async function flushSave() {
+  clearTimeout(saveTimer);
+  if (!authUser || !saveDirty) return saving;
+  if (saving) { await saving; if (!saveDirty) return; }
+  saveDirty = false;
+  const body = { user_id: authUser.id, data: S };
+  saving = SB.from('user_states').upsert(body).then(({ error }) => {
+    if (error) { saveDirty = true; console.error(error); toast('保存できませんでした。通信状態を確認してください'); setTimeout(save, 5000); }
+  }).finally(() => { saving = null; });
+  return saving;
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushSave(); });
+window.addEventListener('beforeunload', e => { if (saveDirty || saving) { flushSave(); e.preventDefault(); e.returnValue = ''; } });
 
 /* ---------- 画面状態（保存しない） ---------- */
 const ui = {
@@ -2888,89 +2884,101 @@ function addWorkspaceModal() {
     body.append(b);
   });
 }
-/* ---------- アカウント（メールアドレス＋パスワード） ----------
-   研修用：アカウント情報はこのブラウザの中（localStorage）にだけ保存されます。
-   パスワードはそのまま保存せず、ソルト付き SHA-256 のハッシュにして保存します。 */
-async function hashPw(pw, salt) {
-  const data = new TextEncoder().encode(salt + ':' + pw);
-  if (crypto?.subtle) {
-    const buf = await crypto.subtle.digest('SHA-256', data);
-    return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
-  }
-  // crypto.subtle が使えない環境向けの簡易ハッシュ
-  let h = 2166136261; for (const b of data) { h ^= b; h = Math.imul(h, 16777619) >>> 0; }
-  return 'f' + h.toString(16);
-}
-async function setAccount(email, pw) {
-  const salt = uid() + uid();
-  S.auth = { email: email.trim().toLowerCase(), salt, hash: await hashPw(pw, salt) };
-  me().email = email.trim();
-  save();
-}
-async function checkAccount(email, pw) {
-  if (!S.auth) return false;
-  return S.auth.email === email.trim().toLowerCase() && S.auth.hash === await hashPw(pw, S.auth.salt);
-}
-const PW_MIN = 6;
-function pwFormHTML({ email = '', confirm = true, emailLocked = false } = {}) {
-  return `<label class="field"><span>メールアドレス</span><input class="inp" type="email" name="ae" value="${esc(email)}" placeholder="name@work-email.com" autocomplete="username"${emailLocked ? ' readonly' : ''}></label>
-    <label class="field"><span>パスワード</span><input class="inp" type="password" name="ap" placeholder="${PW_MIN} 文字以上" autocomplete="new-password"></label>
-    ${confirm ? `<label class="field"><span>パスワード（確認）</span><input class="inp" type="password" name="ap2" autocomplete="new-password"></label>` : ''}`;
-}
-function readPwForm(body, { confirm = true } = {}) {
-  const e = $('[name=ae]', body), p = $('[name=ap]', body), p2 = $('[name=ap2]', body);
-  if (!e.value.trim() || !e.checkValidity()) { e.focus(); toast('メールアドレスを正しく入力してください'); return null; }
-  if (p.value.length < PW_MIN) { p.focus(); toast(`パスワードは ${PW_MIN} 文字以上にしてください`); return null; }
-  if (confirm && p.value !== p2.value) { p2.focus(); toast('確認用のパスワードが一致しません'); return null; }
-  return { email: e.value.trim(), pw: p.value };
-}
-/* 自分メニュー「アカウント設定」：メールアドレスとパスワードの登録・変更 */
-function accountModal() {
-  const has = !!S.auth;
-  const body = el('div', '', `${has ? `<p class="hint-text" style="margin:0 0 14px">現在のアカウント：<b>${esc(S.auth.email)}</b></p>` : '<p class="hint-text" style="margin:0 0 14px">サインアウト後にサインインするためのメールアドレスとパスワードを設定します。</p>'}
-    ${has ? `<label class="field"><span>現在のパスワード</span><input class="inp" type="password" name="cur" autocomplete="current-password"></label>` : ''}
-    ${pwFormHTML({ email: S.auth?.email || me().email || '' })}`);
+/* ---------- アカウント（Supabase Auth：メールアドレス＋パスワード） ----------
+   アカウントは管理者が発行します（scripts\admin-users.ps1）。サイトからの新規登録はできません。 */
+const PW_MIN = 8;
+const authErrorText = e => {
+  const m = (e?.message || '').toLowerCase();
+  if (m.includes('invalid login')) return 'メールアドレスまたはパスワードが正しくありません。';
+  if (m.includes('should be different')) return '新しいパスワードは今のパスワードと別のものにしてください。';
+  if (m.includes('password')) return `パスワードは ${PW_MIN} 文字以上で、推測されにくいものにしてください。`;
+  if (m.includes('rate') || m.includes('too many')) return '試行回数が多すぎます。しばらく待ってからもう一度お試しください。';
+  if (m.includes('fetch') || m.includes('network')) return '通信できませんでした。インターネット接続を確認してください。';
+  return '処理できませんでした。時間をおいてもう一度お試しください。';
+};
+/* パスワード変更（サイドバー上部メニュー／初回サインイン時の仮パスワード変更） */
+function passwordModal({ forced = false } = {}) {
+  if (!authUser) return;
+  const body = el('div', '', `
+    <p class="hint-text" style="margin:0 0 14px">${forced ? '管理者が発行した<b>仮パスワード</b>でサインインしています。自分だけが知っている新しいパスワードに変更してください。' : `アカウント：<b>${esc(authUser.email)}</b>`}</p>
+    ${forced ? '' : '<label class="field"><span>現在のパスワード</span><input class="inp" type="password" name="cur" autocomplete="current-password"></label>'}
+    <label class="field"><span>新しいパスワード</span><input class="inp" type="password" name="ap" placeholder="${PW_MIN} 文字以上" autocomplete="new-password"></label>
+    <label class="field"><span>新しいパスワード（確認）</span><input class="inp" type="password" name="ap2" autocomplete="new-password"></label>`);
+  let busy = false;
   const m = modal({
-    title: 'アカウント設定', body, buttons: [{ label: 'キャンセル' }, {
-      label: '保存', primary: true, fn: () => {
-        const v = readPwForm(body); if (!v) return false;
+    title: forced ? '新しいパスワードを設定' : 'パスワードを変更', body,
+    buttons: [...(forced ? [{ label: 'あとで' }] : [{ label: 'キャンセル' }]), {
+      label: '変更する', primary: true, fn: () => {
+        const p = $('[name=ap]', body), p2 = $('[name=ap2]', body), cur = $('[name=cur]', body);
+        if (cur && !cur.value) { cur.focus(); toast('現在のパスワードを入力してください'); return false; }
+        if (p.value.length < PW_MIN) { p.focus(); toast(`パスワードは ${PW_MIN} 文字以上にしてください`); return false; }
+        if (p.value !== p2.value) { p2.focus(); toast('確認用のパスワードが一致しません'); return false; }
+        if (busy) return false;
+        busy = true;
         (async () => {
-          if (has && !(await checkAccount(S.auth.email, $('[name=cur]', body).value))) return toast('現在のパスワードが正しくありません');
-          await setAccount(v.email, v.pw); renderAll(); toast('アカウントを保存しました');
-          m.close();
+          try {
+            if (cur) {
+              const { error } = await SB.auth.signInWithPassword({ email: authUser.email, password: cur.value });
+              if (error) { toast('現在のパスワードが正しくありません'); return; }
+            }
+            const { data, error } = await SB.auth.updateUser({ password: p.value, data: { must_change_password: false } });
+            if (error) { toast(authErrorText(error)); return; }
+            authUser = data.user;
+            toast('パスワードを変更しました'); m.close();
+          } finally { busy = false; }
         })();
-        return false; // 非同期で検証してから閉じる
+        return false; // 非同期で確認してから閉じる
       }
     }],
+    focus: forced ? '[name=ap]' : '[name=cur]',
   });
 }
+const accountModal = () => passwordModal();
 /* 自分メニュー「以下からサインアウト」 */
-function signOut() {
-  if (!S.auth) {
-    // まだパスワードがないとサインインし直せないので、先に設定してもらう
-    const body = el('div', '', `<p class="hint-text" style="margin:0 0 14px">サインアウトすると、もう一度サインインするにはメールアドレスとパスワードが必要です。先にパスワードを設定してください。</p>${pwFormHTML({ email: me().email || '' })}`);
-    modal({
-      title: 'パスワードを設定してサインアウト', body, buttons: [{ label: 'キャンセル' }, {
-        label: '設定してサインアウト', primary: true, fn: () => {
-          const v = readPwForm(body); if (!v) return false;
-          setAccount(v.email, v.pw).then(doSignOut);
-        }
-      }],
-    });
+async function signOut() {
+  closePop();
+  if (ui.huddle) { try { toggleHuddle(ui.huddle.ch); } catch {} }
+  await flushSave();
+  await SB?.auth.signOut();
+  location.reload(); // 画面上のデータを残さないよう読み込み直す（サインイン画面から始まる）
+}
+// サインイン完了後：本人のデータを読み込んで画面を表示
+async function enterWorkspace(user) {
+  authUser = user;
+  try { await loadRemote(user); }
+  catch (e) {
+    console.error(e);
+    authUser = null;
+    await SB.auth.signOut().catch(() => {});
+    document.body.classList.remove('booting');
+    signInScreen('workspace', { locked: true });
+    toast('データを読み込めませんでした。時間をおいてもう一度サインインしてください');
+    return false;
+  }
+  applyTheme();
+  ui.view = { type: 'channel', id: null };
+  openChannel(getCh(S.current) ? S.current : S.channels.find(c => c.type === 'channel')?.id || 'c1');
+  renderAll();
+  document.body.classList.remove('booting');
+  if (user.user_metadata?.must_change_password) setTimeout(() => passwordModal({ forced: true }), 400);
+  return true;
+}
+async function finishSignIn(scr, user) {
+  scr.remove();
+  if (await enterWorkspace(user)) toast('サインインしました');
+}
+// 起動：保存済みのセッションがあればそのまま入る。なければサインイン画面
+async function boot() {
+  if (!SB) {
+    document.body.classList.remove('booting');
+    document.body.innerHTML = '<div style="padding:40px;font:16px sans-serif">サーバーに接続するためのプログラムを読み込めませんでした。インターネット接続を確認して、ページを再読み込みしてください。</div>';
     return;
   }
-  doSignOut();
-}
-function doSignOut() {
-  S.signedOut = true; save();
-  closePop(); $('#modalLayer').innerHTML = ''; $('#threadPanel').hidden = true;
-  if (ui.huddle) { try { toggleHuddle(ui.huddle.ch); } catch {} }
-  signInScreen('workspace', { locked: true });
-}
-function finishSignIn(scr) {
-  S.signedOut = false; save();
-  scr.remove();
-  renderAll(); toast('サインインしました');
+  const { data: { session } } = await SB.auth.getSession();
+  if (session?.user) await enterWorkspace(session.user);
+  else { document.body.classList.remove('booting'); signInScreen('workspace', { locked: true }); }
+  // 別のタブでサインアウトした場合などはこのタブも閉じる
+  SB.auth.onAuthStateChange(ev => { if (ev === 'SIGNED_OUT' && authUser) location.reload(); });
 }
 /* 「他のワークスペースにサインインする」：全画面のサインイン画面
    locked: true のときはサインアウト後の画面（閉じられない・本当にサインインする） */
@@ -3028,7 +3036,7 @@ ${ws ? wsBody : formHTML + orHTML + altHTML}
     inp.oninput = () => { err.hidden = true; inp.classList.remove('bad'); };
     $$('[data-p]', scr).forEach(b => b.onclick = () => toast(`研修用のため、${b.dataset.p} では${up ? '登録' : 'サインイン'}できません`));
     $('[data-a=pw]', scr)?.addEventListener('click', () => locked ? stepPw(inp.value.trim()) : toast('研修用のため、パスワードでのサインインはできません'));
-    $('[data-a=signup]', scr)?.addEventListener('click', () => step1('signup'));
+    $('[data-a=signup]', scr)?.addEventListener('click', () => locked ? stepSignup() : step1('signup'));
     $('[data-a=signin]', scr)?.addEventListener('click', () => step1(locked ? 'workspace' : 'signin'));
     $$('[data-a=help]', scr).forEach(b => b.onclick = () => toast('研修用のため、このページは開けません'));
     $('[data-a=back]', scr)?.addEventListener('click', close);
@@ -3047,70 +3055,40 @@ ${ws ? wsBody : formHTML + orHTML + altHTML}
         <button class="si-primary" type="submit">サインイン</button>
       </form>
       <p class="si-trouble"><button data-a="forgot">パスワードをお忘れですか？</button></p>
-      <p class="si-trouble"><button data-a="code">マジックコードでサインインする</button></p>
-      <p class="si-legal">研修用：アカウント情報はこのブラウザの中にだけ保存されます。</p>`;
+      <p class="si-legal">アカウントは管理者が発行します。</p>`;
     const f = $('.si-pwform', scr), em = $('[name=email]', f), pw = $('[name=pw]', f), err = $('.si-err', f);
     const fail = msg => { err.textContent = msg; err.hidden = false; };
     f.onsubmit = async e => {
       e.preventDefault();
       if (!em.value.trim() || !em.checkValidity()) { fail('メールアドレスを正しく入力してください。'); return em.focus(); }
       if (!pw.value) { fail('パスワードを入力してください。'); return pw.focus(); }
-      if (!S.auth) { fail('このブラウザにはまだアカウントがありません。「アカウントを作成する」から登録してください。'); return; }
-      if (!(await checkAccount(em.value, pw.value))) { fail('メールアドレスまたはパスワードが正しくありません。'); pw.value = ''; return pw.focus(); }
-      finishSignIn(scr);
+      const btn = $('.si-primary', f); btn.disabled = true; btn.textContent = 'サインインしています…';
+      const { data, error } = await SB.auth.signInWithPassword({ email: em.value.trim(), password: pw.value });
+      btn.disabled = false; btn.textContent = 'サインイン';
+      if (error) { fail(authErrorText(error)); pw.value = ''; return pw.focus(); }
+      finishSignIn(scr, data.user);
     };
     [em, pw].forEach(x => x.oninput = () => { err.hidden = true; });
     $('[data-a=forgot]', scr).onclick = () => stepReset(em.value.trim());
-    $('[data-a=code]', scr).onclick = () => step1('workspace');
     setTimeout(() => (email ? pw : em).focus(), 30);
   };
-  // パスワードの再設定（研修用：このブラウザ内のアカウントのメールアドレスが一致すれば再設定できる）
-  const stepReset = (email = '') => {
+  // パスワードを忘れた場合：管理者が仮パスワードを再発行する
+  const stepReset = () => {
     $('.si-wrap', scr).innerHTML = `
       <div class="si-logo"><span class="si-mark">会計</span><span>研修ワークスペース</span></div>
-      <h1>パスワードを再設定する</h1>
-      <p class="si-sub">登録したメールアドレスと、新しいパスワードを入力してください。</p>
-      <form class="si-form si-pwform" novalidate>
-        <input class="si-inp" type="email" name="email" placeholder="名前@work-email.com" value="${esc(email)}" autocomplete="username">
-        <input class="si-inp" type="password" name="pw" placeholder="新しいパスワード（${PW_MIN} 文字以上）" autocomplete="new-password">
-        <input class="si-inp" type="password" name="pw2" placeholder="新しいパスワード（確認）" autocomplete="new-password">
-        <div class="si-err" hidden></div>
-        <button class="si-primary" type="submit">パスワードを再設定してサインイン</button>
-      </form>
-      <p class="si-trouble"><button data-a="back2">サインイン画面に戻る</button></p>`;
-    const f = $('.si-pwform', scr), err = $('.si-err', f), fail = m => { err.textContent = m; err.hidden = false; };
-    f.onsubmit = async e => {
-      e.preventDefault();
-      const em = $('[name=email]', f).value.trim(), p = $('[name=pw]', f).value, p2 = $('[name=pw2]', f).value;
-      if (!S.auth || S.auth.email !== em.toLowerCase()) return fail('このメールアドレスのアカウントは見つかりません。');
-      if (p.length < PW_MIN) return fail(`パスワードは ${PW_MIN} 文字以上にしてください。`);
-      if (p !== p2) return fail('確認用のパスワードが一致しません。');
-      await setAccount(em, p); finishSignIn(scr);
-    };
-    $('[data-a=back2]', scr).onclick = () => stepPw(email);
+      <h1>パスワードをお忘れですか？</h1>
+      <p class="si-sub">管理者に連絡して、<b>仮パスワードの再発行</b>を依頼してください。<br>仮パスワードでサインインすると、新しいパスワードの設定画面が表示されます。</p>
+      <button class="si-primary" data-a="back2">サインイン画面に戻る</button>`;
+    $('[data-a=back2]', scr).onclick = () => stepPw();
   };
-  // アカウントを作成する（サインアウト後のみ）
-  const stepSignup = email => {
+  // アカウントの作成：招待制のためサイトからは登録できない
+  const stepSignup = () => {
     $('.si-wrap', scr).innerHTML = `
       <div class="si-logo"><span class="si-mark">会計</span><span>研修ワークスペース</span></div>
-      <h1>パスワードを設定してください</h1>
-      <p class="si-sub"><b>${esc(email)}</b> でアカウントを作成します。</p>
-      <form class="si-form si-pwform" novalidate>
-        <input class="si-inp" type="password" name="pw" placeholder="パスワード（${PW_MIN} 文字以上）" autocomplete="new-password">
-        <input class="si-inp" type="password" name="pw2" placeholder="パスワード（確認）" autocomplete="new-password">
-        <div class="si-err" hidden></div>
-        <button class="si-primary" type="submit">アカウントを作成してサインイン</button>
-      </form>`;
-    const f = $('.si-pwform', scr), err = $('.si-err', f), fail = m => { err.textContent = m; err.hidden = false; };
-    f.onsubmit = async e => {
-      e.preventDefault();
-      if (S.auth) return fail(`このブラウザには既にアカウント（${S.auth.email}）があります。サインインしてください。`);
-      const p = $('[name=pw]', f).value, p2 = $('[name=pw2]', f).value;
-      if (p.length < PW_MIN) return fail(`パスワードは ${PW_MIN} 文字以上にしてください。`);
-      if (p !== p2) return fail('確認用のパスワードが一致しません。');
-      await setAccount(email, p); finishSignIn(scr);
-    };
-    setTimeout(() => $('[name=pw]', f).focus(), 30);
+      <h1>このワークスペースは招待制です</h1>
+      <p class="si-sub">アカウントは管理者が発行します。管理者に、利用するメールアドレスを伝えて招待を依頼してください。</p>
+      <button class="si-primary" data-a="back2">サインイン画面に戻る</button>`;
+    $('[data-a=back2]', scr).onclick = () => stepPw();
   };
   const step2 = (email, mode) => {
     $('.si-wrap', scr).innerHTML = `
@@ -3130,6 +3108,7 @@ ${ws ? wsBody : formHTML + orHTML + altHTML}
     boxes[0].focus();
   };
   step1(startMode);
+  if (locked) stepPw(); // 本番：サインアウト後はメールアドレス＋パスワードで直接サインイン
   document.body.append(scr);
 }
 function wsMenu(anchor) {
@@ -3140,23 +3119,15 @@ function wsMenu(anchor) {
     { label: 'チャンネルを作成', icon: 'plus', fn: addChannelModal },
     { label: 'メンバーを招待', icon: 'users', fn: inviteModal },
     { label: 'プランをアップグレード', icon: 'rocket', fn: plansModal },
-    { label: S.auth ? 'メールアドレス・パスワードを変更' : 'サインイン用のパスワードを設定', icon: 'lock', fn: accountModal },
+    { label: 'パスワードを変更', icon: 'lock', fn: () => passwordModal() },
     { sep: true },
     { label: 'データを初期状態に戻す', icon: 'trash', danger: true, fn: resetData },
   ]);
 }
 function inviteModal() {
-  const body = el('div', '', `<label class="field"><span>名前</span><input class="inp" name="n" placeholder="例：山田 花子"></label><label class="field"><span>役職</span><input class="inp" name="t" placeholder="例：経理"></label><div class="hint-text">研修用のダミーメンバーとして追加されます。DMを送ると自動で返信します。</div>`);
   modal({
-    title: `${S.workspace} にメンバーを招待する`, body, buttons: [{ label: 'キャンセル' }, {
-      label: '招待', primary: true, fn: () => {
-        const n = $('[name=n]', body).value.trim(); if (!n) return false;
-        const id = 'u_' + uid();
-        S.users[id] = { id, name: n, title: $('[name=t]', body).value.trim(), color: pick(['#1264a3', '#2eb67d', '#e8912d', '#9b59b6', '#36c5f0', '#ecb22e']), status: '' };
-        S.channels.filter(c => c.type === 'channel' && !c.private).forEach(c => c.members.push(id));
-        save(); renderAll(); toast(`${n} さんを招待しました`);
-      }
-    }],
+    title: `${S.workspace} にメンバーを招待する`,
+    body: '<p>このワークスペースは各自の練習用です。新しい利用者のアカウントは管理者が発行します。</p><p class="hint-text">管理者に、招待したい人のメールアドレスを伝えてください。</p>',
   });
 }
 function helpModal() {
@@ -3173,13 +3144,17 @@ function helpModal() {
       <li>サイドバーのチャンネルを右クリック：メニュー表示</li>
       <li>チャンネルを「スター付き」へドラッグ：スターを付ける</li>
       <li><code>/shrug</code> <code>/topic 説明</code> <code>/todo 内容</code> <code>/away</code></li>
-    </ul><p class="hint-text">データはこのブラウザ内（localStorage）にのみ保存されます。</p>`,
+    </ul><p class="hint-text">データはサーバーに保存され、同じアカウントならどの端末からでも続きを使えます。</p>`,
   });
 }
 function resetData() {
   modal({
     title: 'データを初期状態に戻す', body: '<p>送信したメッセージ・チャンネル・設定がすべて消え、初期状態に戻ります。よろしいですか？</p>',
-    buttons: [{ label: 'キャンセル' }, { label: '初期化する', danger: true, fn: () => { localStorage.removeItem(STORE_KEY); location.reload(); } }],
+    buttons: [{ label: 'キャンセル' }, { label: '初期化する', danger: true, fn: () => {
+      const u = me();
+      S = seed({ name: u.name, email: u.email || authUser?.email }); normalizeState();
+      save(); flushSave().then(() => location.reload());
+    } }],
   });
 }
 function toggleTheme() { S.theme = S.theme === 'dark' ? 'light' : 'dark'; if (S.prefs) S.prefs.colorMode = S.theme; applyTheme(); save(); renderRail(); }
@@ -3281,9 +3256,9 @@ function bind() {
   setInterval(() => { if (ui.view.type === 'channel' && !document.querySelector('#main .msg .composer')) renderSidebar(); }, 60000);
 }
 
-load();
+// 本番：サインインが確認できるまで画面を隠し、Supabase から本人のデータを読み込む
+document.body.classList.add('booting');
 applyTheme();
 bind();
-openChannel(getCh(S.current) ? S.current : 'c1');
-// サインアウトしたまま閉じた場合は、開いた時もサインイン画面から始める
-if (S.signedOut) signInScreen('workspace', { locked: true });
+openChannel('c1');
+boot();

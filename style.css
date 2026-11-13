@@ -757,6 +757,9 @@ body.sb-hidden #sidebar { display: none; }
 .si-pwform { gap: 14px; }
 .si-pwform .si-err { margin-top: -4px; font-size: 14px; }
 .si-pwform .si-primary { margin-top: 6px; }
+/* 起動中（サインイン確認中）は画面を隠す */
+body.booting #app { visibility: hidden; }
+.si-primary:disabled { opacity: .6; cursor: default; }
 /* サインイン画面の上でもメッセージ（トースト）が見えるように */
 body:has(.si-screen) #toast { z-index: 210; }
 .si-primary { height: 44px; border-radius: 8px; background: #4a154b; color: #fff; font-size: 18px; font-weight: 900; }
