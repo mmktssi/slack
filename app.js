@@ -3055,7 +3055,7 @@ ${ws ? wsBody : formHTML + orHTML + altHTML}
         <button class="si-primary" type="submit">サインイン</button>
       </form>
       <p class="si-trouble"><button data-a="forgot">パスワードをお忘れですか？</button></p>
-      <p class="si-legal">アカウントは管理者が発行します。</p>`;
+      <p class="si-trouble">アカウントをお持ちでないですか？ <button data-a="signup2">アカウントを作成する</button></p>`;
     const f = $('.si-pwform', scr), em = $('[name=email]', f), pw = $('[name=pw]', f), err = $('.si-err', f);
     const fail = msg => { err.textContent = msg; err.hidden = false; };
     f.onsubmit = async e => {
@@ -3070,6 +3070,7 @@ ${ws ? wsBody : formHTML + orHTML + altHTML}
     };
     [em, pw].forEach(x => x.oninput = () => { err.hidden = true; });
     $('[data-a=forgot]', scr).onclick = () => stepReset(em.value.trim());
+    $('[data-a=signup2]', scr).onclick = () => stepSignup(em.value.trim());
     setTimeout(() => (email ? pw : em).focus(), 30);
   };
   // パスワードを忘れた場合：管理者が仮パスワードを再発行する
@@ -3081,14 +3082,41 @@ ${ws ? wsBody : formHTML + orHTML + altHTML}
       <button class="si-primary" data-a="back2">サインイン画面に戻る</button>`;
     $('[data-a=back2]', scr).onclick = () => stepPw();
   };
-  // アカウントの作成：招待制のためサイトからは登録できない
-  const stepSignup = () => {
+  // アカウントを作成する（メールアドレス確認なし：登録するとそのままサインイン）
+  const stepSignup = (email = '') => {
     $('.si-wrap', scr).innerHTML = `
       <div class="si-logo"><span class="si-mark">会計</span><span>研修ワークスペース</span></div>
-      <h1>このワークスペースは招待制です</h1>
-      <p class="si-sub">アカウントは管理者が発行します。管理者に、利用するメールアドレスを伝えて招待を依頼してください。</p>
-      <button class="si-primary" data-a="back2">サインイン画面に戻る</button>`;
-    $('[data-a=back2]', scr).onclick = () => stepPw();
+      <h1>アカウントを作成する</h1>
+      <p class="si-sub">メールアドレスとパスワードを入力してください。</p>
+      <form class="si-form si-pwform" novalidate>
+        <input class="si-inp" type="email" name="email" placeholder="名前@work-email.com" value="${esc(email)}" autocomplete="username">
+        <input class="si-inp" type="password" name="pw" placeholder="パスワード（${PW_MIN} 文字以上）" autocomplete="new-password">
+        <input class="si-inp" type="password" name="pw2" placeholder="パスワード（確認）" autocomplete="new-password">
+        <div class="si-err" hidden></div>
+        <button class="si-primary" type="submit">アカウントを作成する</button>
+      </form>
+      <p class="si-trouble">すでにアカウントをお持ちですか？ <button data-a="back2">サインインする</button></p>`;
+    const f = $('.si-pwform', scr), err = $('.si-err', f), fail = m => { err.textContent = m; err.hidden = false; };
+    const em = $('[name=email]', f), p1 = $('[name=pw]', f), p2 = $('[name=pw2]', f);
+    f.onsubmit = async e => {
+      e.preventDefault();
+      if (!em.value.trim() || !em.checkValidity()) { fail('メールアドレスを正しく入力してください。'); return em.focus(); }
+      if (p1.value.length < PW_MIN) { fail(`パスワードは ${PW_MIN} 文字以上にしてください。`); return p1.focus(); }
+      if (p1.value !== p2.value) { fail('確認用のパスワードが一致しません。'); return p2.focus(); }
+      const btn = $('.si-primary', f); btn.disabled = true; btn.textContent = '作成しています…';
+      const { data, error } = await SB.auth.signUp({ email: em.value.trim(), password: p1.value });
+      btn.disabled = false; btn.textContent = 'アカウントを作成する';
+      if (error) {
+        const m = (error.message || '').toLowerCase();
+        return fail(m.includes('already') ? 'このメールアドレスは既に登録されています。サインインしてください。' : authErrorText(error));
+      }
+      // 既に登録済みのアドレスの場合、Supabase はエラーにせず空の identities を返す
+      if (!data.session || !data.user?.identities?.length) return fail('このメールアドレスは既に登録されています。サインインしてください。');
+      finishSignIn(scr, data.user);
+    };
+    [em, p1, p2].forEach(x => x.oninput = () => { err.hidden = true; });
+    $('[data-a=back2]', scr).onclick = () => stepPw(em.value.trim());
+    setTimeout(() => (email ? p1 : em).focus(), 30);
   };
   const step2 = (email, mode) => {
     $('.si-wrap', scr).innerHTML = `
@@ -3127,7 +3155,7 @@ function wsMenu(anchor) {
 function inviteModal() {
   modal({
     title: `${S.workspace} にメンバーを招待する`,
-    body: '<p>このワークスペースは各自の練習用です。新しい利用者のアカウントは管理者が発行します。</p><p class="hint-text">管理者に、招待したい人のメールアドレスを伝えてください。</p>',
+    body: '<p>このワークスペースは各自の練習用です。</p><p class="hint-text">サイトの URL を伝えれば、相手はサインイン画面の「アカウントを作成する」から自分で登録できます。</p>',
   });
 }
 function helpModal() {
