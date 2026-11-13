@@ -4,6 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>会計事業部 - Slack研修</title>
+<meta name="theme-color" content="#3f0e40">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -20,10 +23,15 @@
     <div class="tb-search">
       <i data-ic="search"></i>
       <input id="globalSearch" type="search" placeholder="会計事業部 内を検索する" autocomplete="off">
-      <kbd>Ctrl K</kbd>
     </div>
+    <button class="tb-ai" id="aiBtn" title="AI アシスタント"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h6v6H5z" fill="#36C5F0"/><path d="M13 5h6v6h-6z" fill="#2EB67D"/><path d="M5 13h6v6H5z" fill="#E01E5A"/><path d="M13 13h6v6h-6z" fill="#ECB22E"/><circle cx="9.5" cy="11" r="1.1" fill="#fff"/><circle cx="14.5" cy="11" r="1.1" fill="#fff"/><path d="M9.5 14.2c1.4 1.3 3.6 1.3 5 0" stroke="#fff" stroke-width="1.3" fill="none" stroke-linecap="round"/></svg></button>
     <div class="tb-right">
       <button class="tb-btn" id="helpBtn" title="ヘルプ"><i data-ic="help"></i></button>
+      <div class="win-ctrls" id="winCtrls">
+        <button class="win-btn" id="winMin" title="最小化"><svg viewBox="0 0 10 10"><path d="M0 5h10"/></svg></button>
+        <button class="win-btn" id="winMax" title="最大化"><svg viewBox="0 0 10 10"><rect x=".5" y=".5" width="9" height="9"/></svg></button>
+        <button class="win-btn win-close" id="winClose" title="閉じる"><svg viewBox="0 0 10 10"><path d="M0 0l10 10M10 0 0 10"/></svg></button>
+      </div>
     </div>
   </header>
 
@@ -114,6 +122,7 @@
 
     <!-- ===== スレッドパネル ===== -->
     <section id="threadPanel" hidden></section>
+    <section id="profilePanel" hidden></section>
   </div>
 </div>
 
