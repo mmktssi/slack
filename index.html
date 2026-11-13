@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>会計事業部 - Slack研修</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <!-- ===== トップバー ===== -->
+  <header id="topbar">
+    <div class="tb-left">
+      <button class="tb-btn" id="menuBtn" title="メニュー"><i data-ic="menu"></i></button>
+      <span class="grow"></span>
+      <button class="tb-btn" id="backBtn" title="戻る"><i data-ic="left"></i></button>
+      <button class="tb-btn" id="fwdBtn" title="進む"><i data-ic="right"></i></button>
+      <button class="tb-btn" id="historyBtn" title="履歴"><i data-ic="clock"></i></button>
+    </div>
+    <div class="tb-search">
+      <i data-ic="search"></i>
+      <input id="globalSearch" type="search" placeholder="会計事業部 内を検索する" autocomplete="off">
+      <kbd>Ctrl K</kbd>
+    </div>
+    <div class="tb-right">
+      <button class="tb-btn" id="helpBtn" title="ヘルプ"><i data-ic="help"></i></button>
+    </div>
+  </header>
+
+  <div id="body">
+    <!-- ===== 左端レール ===== -->
+    <nav id="rail">
+      <button class="ws-icon" id="wsIcon" title="会計事業部">会計</button>
+      <button class="rail-item" data-rail="bot"><span class="rail-ic"><i data-ic="bot"></i></span><span>Slackbot</span></button>
+      <button class="rail-item active" data-rail="home"><span class="rail-ic"><i data-ic="home"></i></span><span>ホーム</span></button>
+      <button class="rail-item" data-rail="dms"><span class="rail-ic"><i data-ic="chat"></i><b class="badge" id="dmBadge" hidden></b></span><span>DM</span></button>
+      <button class="rail-item" data-rail="activity"><span class="rail-ic"><i data-ic="bell"></i><b class="badge" id="actBadge" hidden></b></span><span>アクティビティ</span></button>
+      <button class="rail-item" data-rail="files"><span class="rail-ic"><i data-ic="files"></i></span><span>ファイル</span></button>
+      <button class="rail-item" data-rail="todo"><span class="rail-ic"><i data-ic="check"></i></span><span>To-Do</span></button>
+      <button class="rail-item" data-rail="apps"><span class="rail-ic"><i data-ic="apps"></i></span><span>エージェントとツール</span></button>
+      <span class="grow"></span>
+      <button class="rail-round" id="railAdd" title="新規作成"><i data-ic="plus"></i></button>
+      <button class="rail-round" id="themeBtn" title="ダークモード切替"><i data-ic="moon"></i></button>
+      <button class="rail-me" id="meBtn" title="プロフィール"><span class="avatar" id="meAvatar"></span><span class="presence" id="mePresence"></span></button>
+    </nav>
+
+    <!-- ===== サイドバー ===== -->
+    <aside id="sidebar">
+      <!-- ファイル画面用サイドバー -->
+      <div id="sbFiles" hidden>
+        <div class="sb-head">
+          <span class="sb-title">ファイル</span>
+          <span class="grow"></span>
+          <button class="sb-icon" id="sbFilesAdd" title="新規作成"><i data-ic="plus"></i></button>
+        </div>
+        <div class="sb-scroll">
+          <div class="sb-nav">
+            <button class="sb-row" data-fsub="all"><i data-ic="copy"></i><span>全ファイル</span></button>
+            <button class="sb-row" data-fsub="canvas"><i data-ic="canvasnote"></i><span>canvas</span></button>
+          </div>
+          <hr>
+          <div class="sb-nav">
+            <button class="sb-row" data-fsub="deleted"><i data-ic="trash"></i><span>削除済み</span></button>
+          </div>
+          <hr>
+          <div class="sb-section" data-sec="fstarred">
+            <button class="sb-sec-head"><i data-ic="star"></i><span>Starred</span></button>
+            <div class="sb-sec-body" id="starredFiles"></div>
+          </div>
+        </div>
+      </div>
+      <div id="sbHome">
+      <div class="sb-head">
+        <button class="ws-name" id="wsName"><span id="wsNameText">会計事業部</span><i data-ic="down"></i></button>
+        <span class="grow"></span>
+        <button class="sb-icon" id="sbSettings" title="設定"><i data-ic="gear"></i></button>
+        <button class="sb-icon" id="sbCompose" title="新規メッセージ"><i data-ic="edit"></i></button>
+      </div>
+      <div class="sb-scroll">
+        <button class="upgrade-btn" id="upgradeBtn"><i data-ic="rocket"></i>プランをアップグレード</button>
+        <label class="sb-find"><i data-ic="search"></i><input id="sbFilter" placeholder="会話を見つける..." autocomplete="off"></label>
+
+        <div class="sb-nav">
+          <button class="sb-row" data-view="threads"><i data-ic="thread"></i><span>スレッド</span></button>
+          <button class="sb-row" data-view="huddles"><i data-ic="headphones"></i><span>ハドルミーティング</span></button>
+          <button class="sb-row" data-view="drafts"><i data-ic="send"></i><span>下書き＆送信済み</span></button>
+          <button class="sb-row" data-view="bookmarks"><i data-ic="bookmark"></i><span>ブックマークに登録済み</span></button>
+          <button class="sb-row" data-view="directory"><i data-ic="users"></i><span>ディレクトリ</span></button>
+        </div>
+        <hr>
+        <div class="sb-section" data-sec="starred">
+          <button class="sb-sec-head"><i data-ic="star"></i><span>スター付き</span></button>
+          <div class="sb-sec-body" id="starredList"></div>
+        </div>
+        <div class="sb-section" data-sec="channels">
+          <button class="sb-sec-head"><i data-ic="hashbox"></i><span>チャンネル</span></button>
+          <div class="sb-sec-body" id="channelList"></div>
+        </div>
+        <div class="sb-section" data-sec="dms">
+          <button class="sb-sec-head"><i data-ic="chat"></i><span>ダイレクトメッセージ</span></button>
+          <div class="sb-sec-body" id="dmList"></div>
+        </div>
+        <div class="sb-section" data-sec="apps">
+          <button class="sb-sec-head"><i data-ic="apps"></i><span>App</span></button>
+          <div class="sb-sec-body" id="appList"></div>
+        </div>
+      </div>
+      </div>
+      <div id="huddleBar" hidden></div>
+    </aside>
+
+    <!-- ===== メイン ===== -->
+    <main id="main"></main>
+
+    <!-- ===== スレッドパネル ===== -->
+    <section id="threadPanel" hidden></section>
+  </div>
+</div>
+
+<div id="popLayer"></div>
+<div id="modalLayer"></div>
+<div id="toast"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
