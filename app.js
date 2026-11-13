@@ -183,74 +183,413 @@ function autoLink(html) {
   return tpl.innerHTML;
 }
 
-/* ---------- 初期データ（本番：架空メンバー・研修用メッセージなし） ---------- */
+/* ---------- 初期データ ----------
+   共有ワークスペース：チャンネル・メッセージ・プロフィールは全員で共有（Supabase の共有テーブル）。
+   Slackbot との DM と自分用メモ（local: true）、既読位置・下書き・設定などは本人だけのデータ（user_states）。 */
+const BOT_USER = { id: 'bot', name: 'Slackbot', color: '#4a154b', title: 'ボット', bot: true, status: '' };
+const SHARED_DEFAULT_CHANNELS = ['c1', 'c2'];
 function seed(profile = {}) {
   const now = Date.now();
-  const users = {
-    me: { id: 'me', name: profile.name || '自分', email: profile.email || '', color: '#e01e5a', title: '', status: '' },
-    bot: { id: 'bot', name: 'Slackbot', color: '#4a154b', title: 'ボット', bot: true, status: '' },
-  };
-  const ch = (id, name, topic) => ({ id, type: 'channel', name, members: ['me'], topic, starred: false, muted: false, private: false, canvas: { title: '', body: '' } });
-  const channels = [
-    ch('c1', '全体', '全体へのお知らせ用チャンネルです'),
-    ch('c2', '雑談', ''),
-    { id: 'd_bot', type: 'dm', name: '', members: ['me', 'bot'], starred: false, muted: false, canvas: { title: '', body: '' } },
-    { id: 'd_me', type: 'dm', name: '', members: ['me'], starred: false, muted: false, canvas: { title: '', body: '' } },
-  ];
+  const meId = profile.id || 'me';
+  const local = (id, members) => ({ id, type: 'dm', name: '', members, local: true, starred: false, muted: false, canvas: { title: '', body: '' } });
   return {
-    v: 1, me: 'me', workspace: '会計事業部', theme: 'light', users, channels,
-    messages: { c1: [], c2: [], d_bot: [], d_me: [] },
-    lastRead: { c1: now, c2: now, d_bot: now, d_me: now },
+    v: 2, me: meId, workspace: '会計事業部', theme: 'light',
+    users: { [meId]: { id: meId, name: profile.name || '自分', email: profile.email || '', color: '#e01e5a', title: '', status: '' }, bot: { ...BOT_USER } },
+    channels: [local('d_bot', [meId, 'bot']), local('d_me', [meId])],
+    messages: { d_bot: [], d_me: [] },
+    lastRead: { d_bot: now, d_me: now },
     current: 'c1', drafts: {}, todos: [],
     activity: [], bannerClosed: {}, collapsed: {}, away: false,
     trash: [], starredFiles: [],
   };
 }
 
-/* ---------- Supabase（本番データの保存先・認証） ---------- */
+/* ---------- Supabase（認証・保存・リアルタイム同期） ---------- */
 const SB = window.supabase && window.SUPABASE_CONFIG
   ? window.supabase.createClient(window.SUPABASE_CONFIG.url, window.SUPABASE_CONFIG.key, { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false } })
   : null;
 let authUser = null;      // サインイン中のユーザー（Supabase）
 let S = seed();           // サインインするまでは空のワークスペース
 let saveTimer = 0, saveDirty = false, saving = null;
+let rtChannel = null;     // リアルタイム購読
+// サーバーにある共有データの写し（差分を見て、変わった分だけ送る）
+const snap = { msgs: new Map(), reacts: new Set(), chans: new Map(), members: new Set(), profile: '' };
+// キーの並び順に左右されない JSON 文字列（差分比較用。データベースはキー順を並べ替えるため）
+const stable = v => JSON.stringify(v, (k, x) => (x && typeof x === 'object' && !Array.isArray(x) ? Object.fromEntries(Object.keys(x).sort().map(key => [key, x[key]])) : x));
+const SHARED_SKIP_MSG = new Set(['id', 'user', 'ts', 'html', 'files', 'reactions', 'replies', 'bookmarked']);
+const PER_USER_CH = ['starred', 'muted'];
 
 function normalizeState() {
   S.trash = S.trash || [];               // 削除済みファイル
   S.starredFiles = S.starredFiles || []; // スター付きファイル（キー）
   S.prefs = S.prefs || {};
+  S.lastRead = S.lastRead || {};
   delete S.auth; delete S.signedOut;     // 旧ローカル認証の名残
   if (authUser) { const u = S.users[S.me]; if (u && !u.email) u.email = authUser.email; }
 }
-// サインインしたユーザーのデータを読み込む（初回は新しいワークスペースを作成）
-async function loadRemote(user) {
-  const { data, error } = await SB.from('user_states').select('data').eq('user_id', user.id).maybeSingle();
-  if (error) throw error;
-  if (data?.data?.v === 1) S = data.data;
-  else {
-    S = seed({ name: user.email.split('@')[0], email: user.email });
-    const { error: e2 } = await SB.from('user_states').insert({ user_id: user.id, data: S });
-    if (e2) throw e2;
-  }
-  normalizeState();
+
+// --- 行 ⇔ 画面用データの変換 ---
+function msgToRow(m, chId, parentId) {
+  const extra = {};
+  for (const k of Object.keys(m)) if (!SHARED_SKIP_MSG.has(k)) extra[k] = m[k];
+  return { id: m.id, channel_id: chId, parent_id: parentId || null, user_id: m.user, ts: m.ts, html: m.html || '', files: m.files || [], extra };
 }
+function rowToMsg(r, old) {
+  return { ...(r.extra || {}), id: r.id, user: r.user_id, ts: Number(r.ts), html: r.html || '', files: r.files || [],
+    reactions: old?.reactions || {}, replies: old?.replies || [], ...(old?.bookmarked ? { bookmarked: true } : {}) };
+}
+function chToRow(ch) {
+  return { id: ch.id, type: ch.type, name: ch.name || '', topic: ch.topic || '', private: !!ch.private, canvas: ch.canvas || {}, created_by: ch.createdBy || null };
+}
+function rowToCh(r, old) {
+  return { ...(old || {}), id: r.id, type: r.type, name: r.name, topic: r.topic, private: r.private, canvas: r.canvas && Object.keys(r.canvas).length ? r.canvas : { title: '', body: '' },
+    createdBy: r.created_by, members: old?.members || [], starred: !!old?.starred, muted: !!old?.muted };
+}
+const profileData = u => { const { id, ...d } = u; return d; };
+const sortMsgs = list => list.sort((a, b) => a.ts - b.ts);
+
+// 本人だけのデータ（user_states に保存する部分）
+function privateState() {
+  const out = {};
+  for (const k of Object.keys(S)) if (!['users', 'channels', 'messages'].includes(k)) out[k] = S[k];
+  out.v = 2;
+  out.localChannels = S.channels.filter(c => c.local);
+  out.localMessages = Object.fromEntries(out.localChannels.map(c => [c.id, S.messages[c.id] || []]));
+  out.chFlags = Object.fromEntries(S.channels.filter(c => !c.local && (c.starred || c.muted || c.hidden)).map(c => [c.id, { starred: !!c.starred, muted: !!c.muted, hidden: !!c.hidden }]));
+  const bm = [];
+  S.channels.filter(c => !c.local).forEach(c => msgsOf(c.id).forEach(m => [m, ...(m.replies || [])].forEach(x => x.bookmarked && bm.push(x.id))));
+  out.bookmarks = bm;
+  return out;
+}
+
+// 全件取得（1回 1000 件ずつ）
+async function fetchAll(table, select, order) {
+  const rows = [];
+  for (let from = 0; ; from += 1000) {
+    let q = SB.from(table).select(select).range(from, from + 999);
+    if (order) q = q.order(order, { ascending: true });
+    const { data, error } = await q;
+    if (error) throw error;
+    rows.push(...data);
+    if (data.length < 1000) return rows;
+  }
+}
+// メッセージ・リアクションを S に取り込む
+function ingestMessages(msgRows, reactRows) {
+  const byId = new Map();
+  const tops = msgRows.filter(r => !r.parent_id), reps = msgRows.filter(r => r.parent_id);
+  tops.forEach(r => { const m = rowToMsg(r); byId.set(m.id, m); msgsOf(r.channel_id).push(m); snap.msgs.set(r.id, stable(msgToRow(m, r.channel_id, null))); });
+  reps.forEach(r => {
+    const p = byId.get(r.parent_id); const m = rowToMsg(r);
+    if (p) p.replies.push(m); else return;
+    byId.set(m.id, m); snap.msgs.set(r.id, stable(msgToRow(m, r.channel_id, r.parent_id)));
+  });
+  byId.forEach(m => sortMsgs(m.replies));
+  reactRows.forEach(r => {
+    const m = byId.get(r.message_id); if (!m) return;
+    (m.reactions[r.emoji] = m.reactions[r.emoji] || []).push(r.user_id);
+    if (r.user_id === S.me) snap.reacts.add(r.message_id + '|' + r.emoji);
+  });
+}
+// 旧データ（各自ひとり用 v1）を共有ワークスペースへ移す
+function migrateV1(old, user) {
+  const meId = user.id;
+  const fix = v => (v === 'me' ? meId : v);
+  const fixHtml = h => (h || '').replaceAll('data-uid="me"', `data-uid="${meId}"`);
+  const profile = { ...(old.users?.me || {}), id: meId };
+  const chans = [], msgs = {};
+  (old.channels || []).forEach(c => {
+    if (c.type === 'channel') {
+      chans.push({ ...c, members: [meId], createdBy: SHARED_DEFAULT_CHANNELS.includes(c.id) ? null : meId, shared: true });
+      msgs[c.id] = (old.messages?.[c.id] || []).filter(m => m.user === 'me').map(m => ({
+        ...m, user: meId, html: fixHtml(m.html),
+        reactions: Object.fromEntries(Object.entries(m.reactions || {}).filter(([, us]) => us.includes('me')).map(([e]) => [e, [meId]])),
+        replies: (m.replies || []).filter(r => r.user === 'me').map(r => ({ ...r, user: meId, html: fixHtml(r.html), reactions: {}, replies: [] })),
+      }));
+    } else if (c.id === 'd_bot' || c.id === 'd_me') {
+      chans.push({ ...c, members: c.members.map(fix).filter(x => x === meId || x === 'bot'), local: true });
+      msgs[c.id] = (old.messages?.[c.id] || []).map(m => ({ ...m, user: fix(m.user), html: fixHtml(m.html) }));
+    }
+  });
+  const { users, channels, messages, ...rest } = old;
+  return { rest: { ...rest, me: meId, v: 2 }, profile, chans, msgs };
+}
+
+// サインインしたユーザーのデータを読み込む
+async function loadRemote(user) {
+  const { data: st, error } = await SB.from('user_states').select('data').eq('user_id', user.id).maybeSingle();
+  if (error) throw error;
+  let priv = st?.data, migrated = null;
+  if (priv?.v === 1) { migrated = migrateV1(priv, user); priv = migrated.rest; }
+  if (!priv || priv.v !== 2) {
+    priv = seed({ id: user.id, name: user.email.split('@')[0], email: user.email });
+    priv.localChannels = priv.channels; priv.localMessages = priv.messages;
+  }
+  // 共有データを取得
+  const [profiles, chRows, memRows, msgRows, reactRows] = await Promise.all([
+    fetchAll('profiles', 'id,data'),
+    fetchAll('channels', '*', 'created_at'),
+    fetchAll('channel_members', 'channel_id,user_id'),
+    fetchAll('messages', 'id,channel_id,parent_id,user_id,ts,html,files,extra', 'ts'),
+    fetchAll('reactions', 'message_id,user_id,emoji'),
+  ]);
+  snap.msgs.clear(); snap.reacts.clear(); snap.chans.clear(); snap.members.clear(); snap.profile = '';
+  const { localChannels = [], localMessages = {}, chFlags = {}, bookmarks = [], users: _u, channels: _c, messages: _m, ...rest } = priv;
+  S = { ...rest, me: user.id, users: { bot: { ...BOT_USER } }, channels: [], messages: {} };
+  // プロフィール
+  profiles.forEach(p => { S.users[p.id] = { ...p.data, id: p.id }; if (p.id === user.id) snap.profile = stable(p.data); });
+  if (!S.users[user.id]) S.users[user.id] = migrated ? { ...migrated.profile } : { id: user.id, name: user.email.split('@')[0], email: user.email, color: '#e01e5a', title: '', status: '' };
+  // チャンネル
+  chRows.forEach(r => { const c = rowToCh(r); S.channels.push(c); S.messages[c.id] = []; snap.chans.set(c.id, stable(chToRow(c))); });
+  memRows.forEach(r => { const c = S.channels.find(x => x.id === r.channel_id); if (c) c.members.push(r.user_id); snap.members.add(r.channel_id + '|' + r.user_id); });
+  ingestMessages(msgRows, reactRows);
+  // 個人用フラグ（スター・ミュート・ブックマーク）
+  S.channels.forEach(c => { const f = chFlags[c.id]; if (f) { c.starred = !!f.starred; c.muted = !!f.muted; c.hidden = !!f.hidden; } });
+  const bm = new Set(bookmarks);
+  S.channels.forEach(c => msgsOf(c.id).forEach(m => [m, ...m.replies].forEach(x => { if (bm.has(x.id)) x.bookmarked = true; })));
+  // ローカル（自分だけ）の DM
+  localChannels.forEach(c => { S.channels.push({ ...c, local: true }); S.messages[c.id] = localMessages[c.id] || []; });
+  // 旧データの移行分を追加（次の保存でサーバーへ送られる）
+  if (migrated) {
+    migrated.chans.filter(c => c.shared).forEach(c => {
+      let cur = S.channels.find(x => x.id === c.id);
+      if (!cur) { const { shared, ...ch } = c; cur = ch; S.channels.push(cur); S.messages[cur.id] = []; }
+      else { cur.starred = !!c.starred; cur.muted = !!c.muted; }
+      const have = new Set(msgsOf(cur.id).map(m => m.id));
+      (migrated.msgs[c.id] || []).forEach(m => { if (!have.has(m.id)) msgsOf(cur.id).push(m); });
+      sortMsgs(msgsOf(cur.id));
+    });
+  }
+  // 最初からある公開チャンネルには自動で参加
+  SHARED_DEFAULT_CHANNELS.forEach(id => { const c = S.channels.find(x => x.id === id); if (c && !c.members.includes(user.id)) c.members.push(user.id); });
+  normalizeState();
+  saveDirty = true; // 移行分・プロフィール・参加情報を送る
+  await flushSave();
+  subscribeRealtime();
+}
+
 // 変更はまとめて少し後に保存（連続した操作で何度も送らないように）
 function save() {
   if (!authUser) return;
   saveDirty = true;
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(flushSave, 700);
+  saveTimer = setTimeout(flushSave, 500);
 }
 async function flushSave() {
   clearTimeout(saveTimer);
   if (!authUser || !saveDirty) return saving;
   if (saving) { await saving; if (!saveDirty) return; }
   saveDirty = false;
-  const body = { user_id: authUser.id, data: S };
-  saving = SB.from('user_states').upsert(body).then(({ error }) => {
-    if (error) { saveDirty = true; console.error(error); toast('保存できませんでした。通信状態を確認してください'); setTimeout(save, 5000); }
-  }).finally(() => { saving = null; });
+  saving = (async () => {
+    try {
+      await pushShared();
+      const { error } = await SB.from('user_states').upsert({ user_id: authUser.id, data: privateState() });
+      if (error) throw error;
+    } catch (e) {
+      saveDirty = true; console.error(e);
+      toast('保存できませんでした。通信状態を確認してください');
+      setTimeout(save, 5000);
+    }
+  })().finally(() => { saving = null; });
   return saving;
+}
+// 共有データの差分をサーバーへ送る
+async function pushShared() {
+  const meId = S.me;
+  const chk = r => { if (r.error) throw r.error; return r; };
+  // プロフィール
+  const myProfile = S.users[meId] ? stable(profileData(S.users[meId])) : '';
+  if (myProfile && myProfile !== snap.profile) {
+    chk(await SB.from('profiles').upsert({ id: meId, data: profileData(S.users[meId]) }));
+    snap.profile = myProfile;
+  }
+  const shared = S.channels.filter(c => !c.local);
+  // チャンネル（新規・変更）
+  for (const c of shared) {
+    if (!snap.chans.has(c.id) && !c.createdBy && !SHARED_DEFAULT_CHANNELS.includes(c.id)) c.createdBy = meId;
+    const row = chToRow(c), js = stable(row);
+    if (snap.chans.get(c.id) === js) continue;
+    if (!snap.chans.has(c.id)) chk(await SB.from('channels').upsert(row, { onConflict: 'id', ignoreDuplicates: true }));
+    else { const { id, created_by, ...upd } = row; chk(await SB.from('channels').update(upd).eq('id', c.id)); }
+    snap.chans.set(c.id, js);
+  }
+  // メンバー（追加）
+  const curMembers = new Set();
+  shared.forEach(c => c.members.filter(u => u !== 'bot').forEach(u => curMembers.add(c.id + '|' + u)));
+  const addM = [...curMembers].filter(k => !snap.members.has(k));
+  // 自分を先に追加（他のメンバーを追加する権限のため）
+  addM.sort((a, b) => (b.endsWith('|' + meId) ? 1 : 0) - (a.endsWith('|' + meId) ? 1 : 0));
+  for (const k of addM) {
+    const [channel_id, user_id] = k.split('|');
+    chk(await SB.from('channel_members').upsert({ channel_id, user_id }, { onConflict: 'channel_id,user_id', ignoreDuplicates: true }));
+    snap.members.add(k);
+  }
+  // メッセージ（自分のものだけ：新規・編集）
+  const curMsgs = new Map();
+  shared.forEach(c => msgsOf(c.id).forEach(m => {
+    curMsgs.set(m.id, msgToRow(m, c.id, null));
+    (m.replies || []).forEach(r => curMsgs.set(r.id, msgToRow(r, c.id, m.id)));
+  }));
+  const upMsgs = [];
+  curMsgs.forEach((row, id) => { if (row.user_id === meId && snap.msgs.get(id) !== stable(row)) upMsgs.push(row); });
+  upMsgs.sort((a, b) => (a.parent_id ? 1 : 0) - (b.parent_id ? 1 : 0));
+  if (upMsgs.length) {
+    chk(await SB.from('messages').upsert(upMsgs));
+    upMsgs.forEach(r => snap.msgs.set(r.id, stable(r)));
+  }
+  // リアクション（自分のもの）
+  const curReacts = new Set(), reactCh = new Map();
+  curMsgs.forEach((row, id) => {
+    const m = findMsg(row.channel_id, id)?.msg;
+    Object.entries(m?.reactions || {}).forEach(([e, us]) => { if (us.includes(meId)) { curReacts.add(id + '|' + e); reactCh.set(id + '|' + e, row.channel_id); } });
+  });
+  const addR = [...curReacts].filter(k => !snap.reacts.has(k) && snap.msgs.has(k.split('|')[0]));
+  if (addR.length) {
+    chk(await SB.from('reactions').upsert(addR.map(k => { const i = k.indexOf('|'); return { message_id: k.slice(0, i), emoji: k.slice(i + 1), user_id: meId, channel_id: reactCh.get(k) }; }), { onConflict: 'message_id,user_id,emoji', ignoreDuplicates: true }));
+    addR.forEach(k => snap.reacts.add(k));
+  }
+  for (const k of [...snap.reacts].filter(k => !curReacts.has(k))) {
+    const i = k.indexOf('|');
+    if (curMsgs.has(k.slice(0, i))) chk(await SB.from('reactions').delete().match({ message_id: k.slice(0, i), user_id: meId, emoji: k.slice(i + 1) }));
+    snap.reacts.delete(k);
+  }
+  // メッセージの削除（自分のもの）
+  const delIds = [];
+  snap.msgs.forEach((js, id) => { if (!curMsgs.has(id) && JSON.parse(js).user_id === meId) delIds.push(id); });
+  if (delIds.length) { chk(await SB.from('messages').delete().in('id', delIds)); }
+  snap.msgs.forEach((js, id) => { if (!curMsgs.has(id)) snap.msgs.delete(id); });
+  // メンバーの削除
+  for (const k of [...snap.members].filter(k => !curMembers.has(k))) {
+    const [channel_id, user_id] = k.split('|');
+    if (shared.some(c => c.id === channel_id)) chk(await SB.from('channel_members').delete().match({ channel_id, user_id }));
+    snap.members.delete(k);
+  }
+  // チャンネルの削除（自分が作ったもの）
+  for (const id of [...snap.chans.keys()].filter(id => !shared.some(c => c.id === id))) {
+    if (JSON.parse(snap.chans.get(id)).created_by === meId) chk(await SB.from('channels').delete().eq('id', id));
+    snap.chans.delete(id);
+  }
+}
+
+/* ---------- リアルタイム受信（ほかの人の操作を画面に反映） ---------- */
+function locateMsg(id) {
+  for (const c of S.channels) for (const m of msgsOf(c.id)) {
+    if (m.id === id) return { ch: c, msg: m, parent: null };
+    const r = (m.replies || []).find(x => x.id === id); if (r) return { ch: c, msg: r, parent: m };
+  }
+  return null;
+}
+let rtRenderTimer = 0;
+const rtRender = () => { clearTimeout(rtRenderTimer); rtRenderTimer = setTimeout(() => { rerender(); updateTyping?.(); }, 60); };
+function notifyIncoming(chId, m, parentId) {
+  if (m.user === S.me) return;
+  const ch = getCh(chId); if (!ch) return;
+  if (ch.hidden) { ch.hidden = false; save(); } // 閉じた DM に新着があれば再表示
+  const mentionsMe = (m.html || '').includes(`data-uid="${S.me}"`) || /data-uid="(channel|here)"/.test(m.html || '');
+  if (mentionsMe) pushActivity({ type: 'mention', ch: chId, msg: m.id, parent: parentId, user: m.user });
+  else if (parentId) {
+    const p = findMsg(chId, parentId)?.msg;
+    if (p && (p.user === S.me || (p.replies || []).some(r => r.user === S.me))) pushActivity({ type: 'reply', ch: chId, msg: m.id, parent: parentId, user: m.user });
+  }
+  const viewing = ui.view.type === 'channel' && ui.view.id === chId && document.hasFocus();
+  if (viewing && !parentId) S.lastRead[chId] = Date.now();
+  if (!viewing && !ch.muted && !S.notifyOff) toast(`💬 ${U(m.user).name}: ${plain(m.html).slice(0, 40)}`);
+}
+async function loadChannelFull(chId) {
+  const [chR, memR, msgR] = await Promise.all([
+    SB.from('channels').select('*').eq('id', chId).maybeSingle(),
+    SB.from('channel_members').select('channel_id,user_id').eq('channel_id', chId),
+    SB.from('messages').select('id,channel_id,parent_id,user_id,ts,html,files,extra').eq('channel_id', chId).order('ts'),
+  ]);
+  if (!chR.data) return;
+  const ids = (msgR.data || []).map(r => r.id);
+  const reR = ids.length ? await SB.from('reactions').select('message_id,user_id,emoji').in('message_id', ids) : { data: [] };
+  let c = getCh(chId);
+  if (!c) { c = rowToCh(chR.data); S.channels.push(c); }
+  snap.chans.set(c.id, stable(chToRow(c)));
+  c.members = (memR.data || []).map(r => r.user_id);
+  c.members.forEach(u => snap.members.add(chId + '|' + u));
+  S.messages[chId] = [];
+  ingestMessages(msgR.data || [], reR.data || []);
+  if (S.lastRead[chId] == null) S.lastRead[chId] = 0;
+  rtRender();
+}
+async function subscribeRealtime() {
+  if (rtChannel) SB.removeChannel(rtChannel);
+  // 保存済みのセッションで開いた場合も、本人としてリアルタイム受信する（RLS を通すため）
+  const { data: { session } } = await SB.auth.getSession();
+  if (session) SB.realtime.setAuth(session.access_token);
+  const on = (table, fn) => rtChannel.on('postgres_changes', { event: '*', schema: 'public', table }, p => { try { fn(p); } catch (e) { console.error(e); } });
+  rtChannel = SB.channel('workspace');
+  on('messages', ({ eventType, new: r, old }) => {
+    if (eventType === 'DELETE') {
+      const hit = locateMsg(old.id); snap.msgs.delete(old.id);
+      if (!hit) return;
+      if (hit.parent) hit.parent.replies = hit.parent.replies.filter(x => x.id !== old.id);
+      else { S.messages[hit.ch.id] = msgsOf(hit.ch.id).filter(x => x.id !== old.id); if (ui.thread?.id === old.id) ui.thread = null; }
+      return rtRender();
+    }
+    if (!getCh(r.channel_id)) return;
+    const hit = locateMsg(r.id);
+    const m = rowToMsg(r, hit?.msg);
+    snap.msgs.set(r.id, stable(msgToRow(m, r.channel_id, r.parent_id)));
+    if (hit) Object.assign(hit.msg, m);
+    else if (r.parent_id) { const p = findMsg(r.channel_id, r.parent_id)?.msg; if (!p) return; p.replies.push(m); sortMsgs(p.replies); notifyIncoming(r.channel_id, m, r.parent_id); }
+    else { msgsOf(r.channel_id).push(m); sortMsgs(msgsOf(r.channel_id)); notifyIncoming(r.channel_id, m, null); }
+    rtRender();
+  });
+  on('reactions', ({ eventType, new: r, old }) => {
+    const row = eventType === 'DELETE' ? old : r;
+    const hit = locateMsg(row.message_id); if (!hit) return;
+    const key = row.message_id + '|' + row.emoji;
+    const list = hit.msg.reactions[row.emoji] = hit.msg.reactions[row.emoji] || [];
+    if (eventType === 'DELETE') {
+      const i = list.indexOf(row.user_id); if (i >= 0) list.splice(i, 1);
+      if (!list.length) delete hit.msg.reactions[row.emoji];
+      if (row.user_id === S.me) snap.reacts.delete(key);
+    } else {
+      if (!list.includes(row.user_id)) list.push(row.user_id);
+      if (row.user_id === S.me) snap.reacts.add(key);
+      else if (hit.msg.user === S.me) pushActivity({ type: 'reaction', ch: hit.ch.id, msg: hit.msg.id, user: row.user_id, emo: row.emoji, parent: hit.parent?.id });
+    }
+    rtRender();
+  });
+  on('channels', ({ eventType, new: r, old }) => {
+    if (eventType === 'DELETE') {
+      S.channels = S.channels.filter(c => c.id !== old.id); delete S.messages[old.id]; snap.chans.delete(old.id);
+      if (ui.view.type === 'channel' && ui.view.id === old.id) openChannel('c1');
+      return rtRender();
+    }
+    const cur = getCh(r.id);
+    const c = rowToCh(r, cur);
+    if (cur) Object.assign(cur, c); else { S.channels.push(c); S.messages[c.id] = S.messages[c.id] || []; if (S.lastRead[c.id] == null) S.lastRead[c.id] = Date.now(); }
+    snap.chans.set(r.id, stable(chToRow(c)));
+    rtRender();
+  });
+  on('channel_members', ({ eventType, new: r, old }) => {
+    const row = eventType === 'DELETE' ? old : r;
+    const key = row.channel_id + '|' + row.user_id;
+    const c = getCh(row.channel_id);
+    if (eventType === 'DELETE') {
+      snap.members.delete(key);
+      if (c) c.members = c.members.filter(u => u !== row.user_id);
+      if (row.user_id === S.me && c && (c.type === 'dm' || c.private)) {
+        S.channels = S.channels.filter(x => x.id !== c.id); delete S.messages[c.id];
+        if (ui.view.type === 'channel' && ui.view.id === c.id) openChannel('c1');
+      }
+      return rtRender();
+    }
+    snap.members.add(key);
+    if (c) { if (!c.members.includes(row.user_id)) c.members.push(row.user_id); return rtRender(); }
+    if (row.user_id === S.me) loadChannelFull(row.channel_id); // 新しく招待された DM・チャンネル
+  });
+  on('profiles', ({ new: r }) => {
+    if (!r?.id) return;
+    S.users[r.id] = { ...r.data, id: r.id };
+    if (r.id === S.me) snap.profile = stable(r.data);
+    rtRender();
+  });
+  rtChannel.subscribe();
 }
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushSave(); });
 window.addEventListener('beforeunload', e => { if (saveDirty || saving) { flushSave(); e.preventDefault(); e.returnValue = ''; } });
@@ -322,9 +661,14 @@ function openChannel(id) { go({ type: 'channel', id }); }
 function openDM(userId) {
   let ch = S.channels.find(c => c.type === 'dm' && (userId === S.me ? c.members.length === 1 : c.members.length === 2 && c.members.includes(userId)));
   if (!ch) {
-    ch = { id: 'd_' + uid(), type: 'dm', name: '', members: userId === S.me ? [S.me] : [S.me, userId], starred: false, muted: false, canvas: { title: '', body: '' } };
-    S.channels.push(ch); S.messages[ch.id] = []; save();
+    // 自分用メモと Slackbot は自分だけの DM。ほかの人との DM は共有（2人の ID から決まる同じ ID を使う）
+    const local = userId === S.me || userId === 'bot';
+    const id = userId === S.me ? 'd_me' : userId === 'bot' ? 'd_bot' : 'dm_' + [S.me, userId].sort().join('_');
+    ch = getCh(id) || { id, type: 'dm', name: '', members: userId === S.me ? [S.me] : [S.me, userId], ...(local ? { local: true } : {}), starred: false, muted: false, canvas: { title: '', body: '' } };
+    if (!getCh(id)) { S.channels.push(ch); S.messages[ch.id] = msgsOf(ch.id); }
   }
+  if (ch.hidden) ch.hidden = false;
+  save();
   openChannel(ch.id);
 }
 
@@ -445,7 +789,7 @@ function renderSidebar() {
   // 会話のフィルター・並べ替え（環境設定 > ホーム）
   const curId = ui.view.type === 'channel' ? ui.view.id : null;
   const lastTs = c => msgsOf(c.id).at(-1)?.ts || 0;
-  const mentioned = c => msgsOf(c.id).some(m => m.ts > (S.lastRead[c.id] || 0) && m.html?.includes('data-uid="me"'));
+  const mentioned = c => msgsOf(c.id).some(m => m.ts > (S.lastRead[c.id] || 0) && m.html?.includes(`data-uid="${S.me}"`));
   const flt = P.convFilter || 'active';
   const visible = c => {
     if (c.id === curId || f) return true; // 表示中の会話と検索中は常に表示
@@ -475,7 +819,7 @@ function renderSidebar() {
   addCh.onclick = () => addChannelModal(); cl.append(addCh);
   // DM
   const dl = $('#dmList'); dl.innerHTML = '';
-  sorted(S.channels.filter(c => c.type === 'dm' && !c.starred && match(c) && visible(c))).forEach(c => dl.append(chRow(c)));
+  sorted(S.channels.filter(c => c.type === 'dm' && !c.starred && !c.hidden && match(c) && visible(c))).forEach(c => dl.append(chRow(c)));
   const addDm = el('button', 'sb-row add', `<span class="plusbox">${ic('plus')}</span><span class="name">メンバーを追加する</span>`);
   addDm.onclick = () => newDmModal(); dl.append(addDm);
   // App
@@ -638,7 +982,7 @@ function renderMsg(ch, m, { cont = false, inThread = false, parent = null } = {}
   const sub = m.sub ? `<div class="sub-line">${esc(m.sub)}</div>` : '';
   let text = m.html ? autoLink(m.html) : '';
   // 自分宛てメンションを強調
-  text = text.replace(/<span class="mention" data-uid="me">/g, '<span class="mention me" data-uid="me">');
+  text = text.split(`<span class="mention" data-uid="${S.me}">`).join(`<span class="mention me" data-uid="${S.me}">`);
   row.innerHTML = `${gutter}<div class="msg-body">${head}${sub}<div class="msg-text">${text}${m.edited ? '<span class="edited">(編集済み)</span>' : ''}</div></div>`;
   const body = $('.msg-body', row);
   if (m.files && m.files.length) body.append(renderFiles(m.files));
@@ -1140,6 +1484,8 @@ const BOT_HELP = [
 function simulateResponses(chId, m, parentId) {
   const ch = getCh(chId); if (!ch) return;
   const mentioned = [...m.html.matchAll(/data-uid="([^"]+)"/g)].map(x => x[1]).filter(x => x !== S.me && S.users[x]);
+  // 本物のメンバーは自分で返信するので、自動返信は Slackbot だけ
+  if (!ch.members.includes('bot')) return;
   let responders = [...mentioned];
   if (mentioned.length === 0 && /data-uid="channel"/.test(m.html)) responders = ch.members.filter(x => x !== S.me).slice(0, 2);
   if (ch.type === 'dm') { const p = dmPartner(ch); if (p !== S.me && !responders.includes(p)) responders.push(p); }
@@ -1166,12 +1512,12 @@ function simulateResponses(chId, m, parentId) {
         html = /ヘルプ|help|使い方|\?|？/i.test(txt) ? BOT_HELP[0] : pick(BOT_HELP);
       } else {
         html = pick(REPLIES);
-        if (mentioned.includes(who) && ch.type === 'channel') html = `<span class="mention" data-uid="me">@${esc(me().name)}</span> ${html}`;
+        if (mentioned.includes(who) && ch.type === 'channel') html = `<span class="mention" data-uid="${S.me}">@${esc(me().name)}</span> ${html}`;
       }
       const r = { id: uid(), user: who, ts: Date.now(), html, reactions: {}, replies: [], files: [] };
       if (parentId) { const p = findMsg(chId, parentId)?.msg; if (p) p.replies.push(r); pushActivity({ type: 'reply', ch: chId, msg: r.id, parent: parentId, user: who }); }
       else msgsOf(chId).push(r);
-      if (/data-uid="me"/.test(html)) pushActivity({ type: 'mention', ch: chId, msg: r.id, parent: parentId, user: who });
+      if (html.includes(`data-uid="${S.me}"`)) pushActivity({ type: 'mention', ch: chId, msg: r.id, parent: parentId, user: who });
       const viewing = ui.view.type === 'channel' && ui.view.id === chId && document.hasFocus();
       if (viewing && !parentId) S.lastRead[chId] = Date.now();
       if (!viewing && !ch.muted && !S.notifyOff) toast(`💬 ${U(who).name}: ${plain(html).slice(0, 40)}`);
@@ -1800,6 +2146,8 @@ function channelDetails(ch, tab = 'about') {
   });
 }
 function confirmDelete(ch) {
+  // 共有チャンネルは作った人だけが削除できる（最初からある「全体」「雑談」は削除不可）
+  if (!ch.local && ch.createdBy !== S.me) return toast('このチャンネルを削除できるのは作成した人だけです');
   modal({
     title: 'チャンネルを削除しますか？', body: `<p><b>#${esc(ch.name)}</b> とそのすべてのメッセージが削除されます。この操作は取り消せません。</p>`,
     buttons: [{ label: 'キャンセル' }, {
@@ -1822,7 +2170,7 @@ function channelMenu(ch, anchor) {
     { label: 'ハドルを開始', icon: 'headphones', fn: () => toggleHuddle(ch.id) },
   ];
   if (ch.type === 'channel') items.push({ sep: true }, { label: 'チャンネルを削除', icon: 'trash', danger: true, fn: () => confirmDelete(ch) });
-  else if (ch.id !== 'd_bot' && ch.members.length > 1) items.push({ sep: true }, { label: 'DMを閉じる', icon: 'x', fn: () => { S.channels = S.channels.filter(c => c !== ch); save(); openChannel(S.channels[0].id); } });
+  else if (ch.id !== 'd_bot' && ch.members.length > 1) items.push({ sep: true }, { label: 'DMを閉じる', icon: 'x', fn: () => { ch.hidden = true; save(); openChannel(S.channels.find(c => c.type === 'channel')?.id || 'c1'); } });
   popMenu(anchor, items);
 }
 function plansModal() {
@@ -3177,10 +3525,13 @@ function helpModal() {
 }
 function resetData() {
   modal({
-    title: 'データを初期状態に戻す', body: '<p>送信したメッセージ・チャンネル・設定がすべて消え、初期状態に戻ります。よろしいですか？</p>',
+    title: 'データを初期状態に戻す', body: '<p>自分の設定・下書き・To-Do・Slackbot と自分用メモの内容が初期状態に戻ります。<br>チャンネルに送ったメッセージは消えません（みんなと共有しているため）。よろしいですか？</p>',
     buttons: [{ label: 'キャンセル' }, { label: '初期化する', danger: true, fn: () => {
-      const u = me();
-      S = seed({ name: u.name, email: u.email || authUser?.email }); normalizeState();
+      const fresh = seed({ id: S.me });
+      const shared = S.channels.filter(c => !c.local);
+      shared.forEach(c => { c.starred = false; c.muted = false; });
+      S = { ...fresh, users: S.users, channels: [...shared, ...fresh.channels], messages: { ...Object.fromEntries(shared.map(c => [c.id, msgsOf(c.id)])), ...fresh.messages } };
+      normalizeState();
       save(); flushSave().then(() => location.reload());
     } }],
   });
